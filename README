@@ -1,0 +1,6 @@
+alsa-android - Alsa virtual driver that uses the MSM android sound driver
+
+To use, add the following to ~/.asoundrc or to /etc/asoundrc:
+		pcm.!default {
+				type alsa_android
+		}

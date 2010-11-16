@@ -1,0 +1,20 @@
+device=0 ear
+device=1 speaker
+device=2 headset
+
+
+channels=1 or 2
+
+msm_snd ioctl must be called after set incall to enable sound SND_SET_DEVICE
+ear_mute must be SND_MUTE_UNMUTED and device==1 to enable the speaker
+mic_mute==SND_MUTE_UNMUTED to enable recording (snd_state |= SND_STATE_RECORD, i need to check if others set this state) also msm_pcm_in enable recording. this means msm_pcm_in should be opened before msm_snd config
+
+    00: HANDSET / 0
+    01: SPEAKER / 1
+    02: HEADSET / 2
+    03: BT / 3
+    04: BT_EC_OFF / 44
+    05: HEADSET_AND_SPEAKER / 10
+    06: CURRENT / 256
+
+
