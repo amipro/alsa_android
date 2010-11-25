@@ -1,2 +1,2 @@
-
-
+alsa_andoid-0.02:
+	- Add monitor thread to notify of controls values changes
