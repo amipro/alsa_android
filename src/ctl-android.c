@@ -22,6 +22,7 @@
 #include <sys/ioctl.h>
 #include <alsa/asoundlib.h>
 #include <alsa/control_external.h>
+#include <pthread.h>
 
 #ifndef uint32_t
 #define uint32_t unsigned int
@@ -34,6 +35,8 @@ typedef struct snd_ctl_android {
 	snd_ctl_ext_t ext;
 	int end_point_count;
 	struct msm_snd_endpoint *end_point_list;
+	pthread_t monitor_thread;
+	int push_fd;
 } snd_ctl_android_t;
 
 enum{
@@ -220,10 +223,57 @@ static void android_close(snd_ctl_ext_t *ext)
 {
 	snd_ctl_android_t *android = ext->private_data;
 
+	pthread_cancel(android->monitor_thread);
+	close(android->ext.poll_fd);
+	close(android->push_fd);
 	if(android && android->end_point_list)
 		free(android->end_point_list);
 	if(android)
 		free(android);
+}
+
+// Values changes are pushed from the monitor thread
+static int android_read_event(snd_ctl_ext_t *ext,
+                          snd_ctl_elem_id_t *id,
+                          unsigned int *event_mask)
+{
+	int i;
+	int ret=read(ext->poll_fd, &i, sizeof(int));
+	if(ret==sizeof(int)){
+		android_elem_list(ext, i, id);
+		*event_mask = SND_CTL_EVENT_MASK_VALUE;
+	}
+
+	return ret;
+}
+
+// Monitor changes in the values. It is running in a seperate thread
+void *android_monitor(void *arg)
+{
+	snd_ctl_android_t *android=(snd_ctl_android_t *)arg;
+	long old_volume=0;
+	unsigned int old_route=0;
+	long volume=0;
+	unsigned int route=0;
+	int control;
+
+	while(1){
+		sleep(2);
+		if(!shared_props_get_volume(&volume)){
+			if(volume!=old_volume){
+				old_volume=volume;
+				control=0;
+				write(android->push_fd, &control, sizeof(control));
+			}
+		}
+		if(!shared_props_get_route(&route)){
+			if(route!=old_route){
+				old_route=route;
+				control=1;
+				write(android->push_fd, &control, sizeof(control));
+			}
+		}
+	}
 }
 
 static snd_ctl_ext_callback_t android_ext_callback = {
@@ -239,7 +289,7 @@ static snd_ctl_ext_callback_t android_ext_callback = {
 	.read_enumerated = android_read_enumerated,
 	.write_integer = android_write_integer,
 	.write_enumerated = android_write_enumerated,
-	//	.read_event = android_read_event,
+	.read_event = android_read_event,
 };
 
 
@@ -248,6 +298,7 @@ SND_CTL_PLUGIN_DEFINE_FUNC(alsa_android)
 	snd_config_iterator_t it, next;
 	int err, fd=-1, i;
 	snd_ctl_android_t *android=0;
+	int pipes[2];
 
 	snd_config_for_each(it, next, conf) {
 		snd_config_t *n = snd_config_iterator_entry(it);
@@ -260,13 +311,20 @@ SND_CTL_PLUGIN_DEFINE_FUNC(alsa_android)
 		return -EINVAL;
 	}
 
-	android = calloc(1, sizeof(*android));
+	if(pipe(pipes))		// Used by the monitor thread to push changes
+		return errno;
+	
+	fcntl(pipes[0], F_SETFL, O_NONBLOCK);
+	fcntl(pipes[1], F_SETFL, O_NONBLOCK);
 
+	android = calloc(1, sizeof(*android));
+	
 	android->ext.version = SND_CTL_EXT_VERSION;
 	android->ext.card_idx = 0; /* FIXME */
 	strcpy(android->ext.driver, "Alsa - Android PCM Plugin");
 	strcpy(android->ext.name, "Alsa - Android PCM Plugin");
-	android->ext.poll_fd = -1;
+	android->ext.poll_fd = pipes[0];
+	android->push_fd = pipes[1];
 	android->ext.callback = &android_ext_callback;
 	android->ext.private_data = android;
 
@@ -300,10 +358,14 @@ SND_CTL_PLUGIN_DEFINE_FUNC(alsa_android)
 	if (err < 0)
 		goto error;
 
+	pthread_create(&android->monitor_thread, NULL, android_monitor, android);
+	
 	*handlep = android->ext.handle;
 	return 0;
 
 error:
+	close(pipes[0]);
+	close(pipes[1]);
 	if(fd>-1)
 		close(fd);
 	if(android && android->end_point_list)
